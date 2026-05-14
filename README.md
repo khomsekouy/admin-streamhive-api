@@ -1,99 +1,174 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# StreamHive Admin API
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+NestJS admin/back-office API for StreamHive, built with a Clean Architecture
+layout per feature module.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Stack
 
-## Description
+- **Runtime**: Node.js 22, NestJS 11
+- **DB**: PostgreSQL via Prisma 6
+- **Auth**: JWT access + rotating refresh tokens (bcrypt password hashes)
+- **Validation**: Zod (via a custom `ZodValidationPipe`)
+- **Config**: `@nestjs/config` with a Zod schema (`validate` hook)
+- **Logging**: `nestjs-pino` (pretty in dev, JSON in production, request-id'd)
+- **Docs**: Swagger UI at `/api/docs`
+- **Container**: Multi-stage Dockerfile + docker-compose for Postgres + API
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Architecture
 
-## Project setup
+The project follows Clean Architecture per feature module. Each module owns
+four layers; dependencies only point *inward*:
 
-```bash
-$ npm install
+```
+presentation ──> application ──> domain
+       └────────> infrastructure ──> domain
 ```
 
-## Compile and run the project
+- **domain/** — Entities, value objects, repository *interfaces*, domain
+  exceptions. Zero framework imports. The business invariants live here.
+- **application/** — Use cases (one class per business action), application
+  DTOs, and *ports* (interfaces) for anything that must touch the outside
+  world (e.g. `PasswordHasher`, `TokenService`).
+- **infrastructure/** — Concrete adapters: Prisma repository implementations,
+  bcrypt hasher, JWT token service, Passport strategies, mappers between
+  Prisma rows and domain entities.
+- **presentation/** — HTTP layer: controllers, request/response DTOs, guards,
+  per-route validation pipes. Controllers are thin and delegate to use cases.
 
-```bash
-# development
-$ npm run start
+Wiring happens in each `*.module.ts` via Nest providers, with `Symbol` tokens
+binding domain interfaces to their infrastructure implementations:
 
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+```ts
+providers: [
+  { provide: USER_REPOSITORY, useClass: PrismaUserRepository },
+  { provide: PASSWORD_HASHER, useClass: BcryptPasswordHasher },
+]
 ```
 
-## Run tests
+This means use cases depend only on interfaces from the domain/application
+layer — swap Prisma for anything else by replacing one binding.
 
-```bash
-# unit tests
-$ npm run test
+### Source layout
 
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+```
+src/
+├── main.ts                     # Bootstrap: pipes, filters, Swagger, CORS
+├── app.module.ts               # Composition root: global guards/filter/interceptor
+├── config/
+│   ├── env.schema.ts           # Zod schema + validateEnv()
+│   └── app.config.ts
+├── shared/
+│   ├── domain/                 # Entity/AggregateRoot/ValueObject bases, DomainException
+│   ├── application/            # UseCase<I,O>, pagination helpers
+│   ├── infrastructure/
+│   │   ├── prisma/             # Global PrismaModule + PrismaService
+│   │   └── logger/             # Pino logger module (request-id, redactions)
+│   └── presentation/
+│       ├── filters/            # AllExceptionsFilter (domain → HTTP)
+│       ├── interceptors/       # TransformInterceptor ({ data, timestamp })
+│       ├── decorators/         # @CurrentUser, @Roles, @Public
+│       └── pipes/              # ZodValidationPipe
+└── modules/
+    ├── users/
+    │   ├── domain/             # User entity, UserRepository interface
+    │   ├── application/        # CreateUser/Update/Delete/Get/List use cases, ports
+    │   ├── infrastructure/     # PrismaUserRepository, BcryptPasswordHasher, mapper
+    │   ├── presentation/       # UsersController, request DTOs
+    │   └── users.module.ts
+    ├── auth/
+    │   ├── domain/             # RefreshToken entity, RefreshTokenRepository
+    │   ├── application/        # Login/Refresh/Logout use cases, TokenService port
+    │   ├── infrastructure/     # JwtTokenService, JwtStrategy, PrismaRefreshTokenRepository
+    │   ├── presentation/       # AuthController, JwtAuthGuard, RolesGuard
+    │   └── auth.module.ts
+    └── streams/
+        ├── domain/             # Channel + Stream entities (with state transitions)
+        ├── application/        # Create/list/get + transition use cases
+        ├── infrastructure/     # Prisma repositories + mappers
+        ├── presentation/       # ChannelsController, StreamsController
+        └── streams.module.ts
 ```
 
-## Deployment
+### Cross-cutting concerns
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+- **AuthN**: `JwtAuthGuard` is registered as `APP_GUARD`, so *all* routes
+  require a bearer token unless decorated with `@Public()`.
+- **AuthZ**: `RolesGuard` is also global. Use `@Roles('ADMIN', 'EDITOR')` on
+  handlers to gate by role. No `@Roles()` ⇒ any authenticated user.
+- **Errors**: Domain exceptions (`EntityNotFoundException`,
+  `ValidationException`, `ConflictException`, `UnauthorizedDomainException`)
+  are translated to proper HTTP responses by `AllExceptionsFilter`.
+- **Response shape**: `TransformInterceptor` wraps every successful response as
+  `{ data, timestamp }`.
+- **Logging**: every request gets an `x-request-id` (echoed in the response
+  header and included in log lines). Sensitive fields (`Authorization` header,
+  `password`, `refreshToken` body keys) are redacted.
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## Getting started
+
+### 1. Install
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+npm install
+cp .env.example .env
+# edit .env (in particular replace the two JWT secrets)
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+### 2. Database
 
-## Resources
+Either bring up the bundled Postgres:
 
-Check out a few resources that may come in handy when working with NestJS:
+```bash
+docker compose up -d postgres
+```
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+…or point `DATABASE_URL` at any Postgres instance you already have.
 
-## Support
+Then apply the schema:
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+```bash
+npx prisma migrate dev --name init
+npx prisma generate
+```
 
-## Stay in touch
+### 3. Run
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+```bash
+npm run start:dev
+```
 
-## License
+- API: <http://localhost:3000/api>
+- Swagger: <http://localhost:3000/api/docs>
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
-# admin-streamhive-api
+### 4. Tests
+
+```bash
+npm test              # unit
+npm run test:e2e      # e2e
+```
+
+## Full Docker stack
+
+```bash
+docker compose up --build
+```
+
+This starts Postgres + the API on port 3000. Apply migrations the first time:
+
+```bash
+docker compose exec api npx prisma migrate deploy
+```
+
+## Adding a new module
+
+1. Create `src/modules/<feature>/{domain,application,infrastructure,presentation}/`.
+2. Define your entity and a repository **interface** in `domain/`.
+3. Write use cases in `application/use-cases/`, injecting the repository
+   interface via a `Symbol` token.
+4. Add the Prisma model, generate the client, write a mapper +
+   repository implementation in `infrastructure/`.
+5. Add a controller in `presentation/` and bind everything in
+   `<feature>.module.ts`. Import the module in `app.module.ts`.
+
+The shared base classes (`Entity`, `AggregateRoot`, `UseCase<I,O>`,
+`DomainException`) and pipes/filters/decorators take care of the rest.
